@@ -1,0 +1,14 @@
+{
+  "name": "FixtureCo",
+  "positioning": "Local test company",
+  "summary": "A fictional software and automation engineering business. Local fixture only.",
+  "market": "Fixture regional SMEs and startups",
+  "services": [
+    "Software systems",
+    "Automation"
+  ],
+  "portfolio": [],
+  "business_model": "Implementation and support",
+  "goals": "Research sourced leads and deliver tested prototypes",
+  "operating_rules": "Local tests only; no real outreach or deployment."
+}

@@ -1,0 +1,53 @@
+name: CrewBot checks
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: crewbot-checks-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    name: Python 3.11 / ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    env:
+      PYTHONUTF8: '1'
+      OPENAI_API_KEY: ''
+      OPENAI_PROJECT_ID: ''
+      OPENROUTER_API_KEY: ''
+      TAVILY_API_KEY: ''
+      FIRECRAWL_API_KEY: ''
+      RESEND_API_KEY: ''
+      SLACK_BOT_TOKEN: ''
+      GITHUB_TOKEN: ''
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - name: Verify curl is available
+        run: curl --version
+      - name: Compile Python source
+        run: python -m compileall -q .
+      - name: Check browser JavaScript syntax
+        run: |
+          node --check web/landing.js
+          node --check web/os.js
+          node --check web/app.js
+          node --check web/operations.js
+      - name: Run local fixture and release checks
+        run: python -m unittest discover -v

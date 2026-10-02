@@ -1,0 +1,16 @@
+.crewbot/
+credentials*.json
+credentials*.tmp
+company-state.json
+dashboard-state.json
+state.json
+state.json.tmp
+team/
+runs/
+companies/
+company-brief.txt
+__pycache__/
+*.pyc
+*.tmp
+.env*
+!.env.example
