@@ -52,6 +52,27 @@ class CrewBotWorkflowTests(unittest.TestCase):
             self.ops.create_flow({'template_id':'nonexistent','title':'Bad','brief':'Bad'})
         self.assertEqual(self.w.store['flows'],[])
 
+    def test_customer_engagement_runs_with_custom_nonsoftware_team_ids(self):
+        self.w.roles={key:role for key,role in self.w.roles.items() if key in ('mentor','crew-growth','crew-offers','crew-success')}
+        templates=self.ops.templates()
+        customer=next(t for t in templates if t['id']=='customer-engagement')
+        self.assertTrue(customer['available'])
+        self.assertFalse(next(t for t in templates if t['id']=='client-delivery')['available'])
+        flow=self.ops.create_flow({'template_id':'customer-engagement','title':'Bakery catering opportunities','brief':'Research local office catering customers and prepare a draft offer and fulfillment handoff.'})
+        self.assertEqual([s['employee_id'] for s in flow['steps']],['crew-growth','crew-offers','crew-success'])
+        self.assertIn('actual products or services',flow['steps'][1]['instructions'])
+        self.assertIn('fulfilled work',flow['steps'][2]['instructions'])
+        self.ops.start_flow(flow['id']);record=self.ops.find('flows',flow['id'])
+        for index,stage in enumerate(record['steps']):
+            task=self.w.task(stage['task_id']);task.update(status='review',result='Reviewed bakery stage '+str(index))
+            self.ops.sync_flow(task)
+            self.assertEqual(len(self.launched),index+1)
+            self.ops.flow_action({'id':flow['id'],'action':'approve'})
+            if index<2:
+                following=self.w.task(record['steps'][index+1]['task_id'])
+                self.assertIn(task['result'],following['description'])
+        self.assertEqual(record['status'],'completed')
+
     def test_custom_team_handoff_waits_for_review_and_shares_verified_results(self):
         flow=self.ops.create_flow({'template_id':'prospecting','title':'Find customers','brief':'Local fixture business'})
         self.ops.start_flow(flow['id']);record=self.ops.find('flows',flow['id'])

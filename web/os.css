@@ -65,3 +65,5 @@ dialog{background:var(--paper)}.task-result{color:var(--ink)}
 .logo-settings .logo-preview{width:72px;height:72px;object-fit:contain;border:1px solid var(--edge);border-radius:10px;padding:8px;background:var(--cloud)}
 .logo-settings .form-help{max-width:260px}
 @media(max-width:600px){.appearance-panel .dialog-form{grid-template-columns:1fr}.logo-settings{align-items:flex-start}}
+.form-error{margin-top:15px;padding:12px;border-left:3px solid var(--iris);background:var(--cloud);color:var(--ink);font-size:13px}
+@media(min-width:901px){.chat-layout{min-height:0}.conversation-panel,.chat-messages{min-height:0}.message-composer{flex-shrink:0}}

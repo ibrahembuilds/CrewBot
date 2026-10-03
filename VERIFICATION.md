@@ -12,7 +12,7 @@ Final release test and browser results are recorded below after verification.
 
 ## Release checks — 2026-10-03
 
-- 87 automated tests passed in the full QA run (69.283 seconds), without skips.
+- 88 automated tests passed in the final full release run (126.394 seconds), without failures or skips.
 - Python compilation and all four JavaScript syntax checks passed.
 - After the browser-only logo preview/layout correction, all 14 affected feature and HTTP release checks passed again.
 - Browser: separate landing/app routes, blank Mentor-only startup, streamed fixture profile → tailored proposal → owner approval, four custom employees, colors/name/logo saved through UI and retained after reload, and a new company with default branding and no inherited key/logo.
@@ -20,3 +20,5 @@ Final release test and browser results are recorded below after verification.
 - Logo preview uses a data URL compatible with the existing image CSP; no security policy was widened.
 
 Browser company and provider results were explicitly synthetic localhost fixtures, kept outside the release. Source business and employee templates remained empty. Live integrations were not exercised.
+
+Final UI refinements also verified default workflow selection, creation with custom owners, a completed research stage and reviewed offer stage, inline dialog error feedback, and a desktop composer remaining inside the viewport. The Customer engagement template adds a general research-to-offer-to-customer-handoff sequence for non-software businesses.
