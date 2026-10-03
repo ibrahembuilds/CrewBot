@@ -4,7 +4,7 @@ Configure credentials in **Settings → API keys**, then allow the destinations 
 
 | Connection | Setup and permissions | What CrewBot does |
 | --- | --- | --- |
-| OpenRouter | Add `OPENROUTER_API_KEY` or enter the key in Settings. Select an available tool-capable chat model. | Streams employee chat and calls the local tools assigned to each employee. It does not provide a cloud browser or shell. |
+| OpenRouter | Add `OPENROUTER_API_KEY` or enter the key in Settings. Select an available tool-capable chat model, plus default image and video models. | Streams employee chat and calls the local tools assigned to each employee. Studio uses the [Image API](https://openrouter.ai/docs/guides/overview/multimodal/image-generation) and the asynchronous [Video API](https://openrouter.ai/docs/guides/overview/multimodal/video-generation). Charges depend on the model; CrewBot records provider-reported cost. It does not provide a cloud browser or shell. |
 | OpenAI Agents | Add `OPENAI_API_KEY`, choose OpenAI as the provider and enter your own OpenAI project ID. The project needs Agents access and the requested model. | Creates reusable employee definitions, starts hosted sessions using their returned IDs, streams events and handles tool calls. |
 | Tavily | Add `TAVILY_API_KEY`. Your account needs search credits. | Searches the web with a bounded result list and source URLs. Findings still need review. |
 | Firecrawl | Add `FIRECRAWL_API_KEY`. Your account needs scrape credits. | Fetches markdown from a supplied public HTTP(S) page. Login-only pages, private URLs and CAPTCHA handling are not supported by this integration. |

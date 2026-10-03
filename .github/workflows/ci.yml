@@ -49,5 +49,6 @@ jobs:
           node --check web/os.js
           node --check web/app.js
           node --check web/operations.js
+          node --check web/studio.js
       - name: Run local fixture and release checks
         run: python -m unittest discover -v

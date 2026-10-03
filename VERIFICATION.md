@@ -22,3 +22,10 @@ Final release test and browser results are recorded below after verification.
 Browser company and provider results were explicitly synthetic localhost fixtures, kept outside the release. Source business and employee templates remained empty. Live integrations were not exercised.
 
 Final UI refinements also verified default workflow selection, creation with custom owners, a completed research stage and reviewed offer stage, inline dialog error feedback, and a desktop composer remaining inside the viewport. The Customer engagement template adds a general research-to-offer-to-customer-handoff sequence for non-software businesses.
+
+## Studio checks — 2026-10-03
+
+- `test_studio.py` (11 tests) runs actual curl against a localhost fixture that mirrors OpenRouter's documented Image API, Video API (submit → poll → binary content), model catalogs and streamed chat usage. It covers saved assets and provider-reported costs, monthly budget enforcement before any provider call, malformed image rejection, video completion/failure/bounded retries, restart recovery, capability-bound expert tools, idempotent tool receipts, sandboxed page/SVG serving, cross-company and path-traversal 404s, zip export and Studio logos.
+- Full suite: 99 tests passed (1 pre-existing skip). Python compilation and all five JavaScript syntax checks passed.
+- Browser E2E (`tests/e2e/server.py` + `tests/e2e/run.js`, Playwright/Chromium, 24 checks): Mentor chat onboarding, one-click expert hiring, brand kit, live model catalog, logo generation and workspace logo, video render to playback, an engineer building a funnel page through the employee tool loop, sandboxed preview with inlined brand image (the page's attempt to read workspace state was blocked), task cost/asset detail, zip export, Brand launch kit availability, and no horizontal overflow at 390px. No console errors.
+- Model IDs, parameters and pricing come from OpenRouter's public catalogs (57 image, 30 video, 398 tool-capable chat models on 2026-10-03). Live generation quality, billing and account access were not exercised: no real key was used.
