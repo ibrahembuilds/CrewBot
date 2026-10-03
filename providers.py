@@ -98,9 +98,44 @@ class ProviderHTTP:
     def __init__(self,vault,local_origin=None):
         if local_origin and not re.fullmatch(r'http://127\.0\.0\.1:\d+',local_origin):raise scout.ScoutError('Test origin must be localhost.')
         self.vault=vault;self.local_origin=local_origin
-    def request(self,provider,method,path,body=None,headers=None):
-        with self.launch(provider,method,path,body,headers=headers) as result:return result
-    def launch(self,provider,method,path,body=None,stream=False,headers=None):
+    def request(self,provider,method,path,body=None,headers=None,max_bytes=4000000,max_time=180,error_field_ok=False):
+        with self.launch(provider,method,path,body,headers=headers,max_bytes=max_bytes,max_time=max_time,error_field_ok=error_field_ok) as result:return result
+    def download(self,provider,path,destination,max_bytes,max_time=600):
+        """Save a binary provider response (e.g. generated video) to destination; returns its media type."""
+        if provider not in PROVIDERS or not isinstance(path,str) or not path.startswith('/') or path.startswith('//') or any(c.isspace() for c in path) or '\\' in path or '#' in path:
+            raise scout.ScoutError('Invalid provider request.')
+        key=self.vault.get(provider)
+        if not key:raise scout.ScoutError('Add the '+provider+' API key in Settings.')
+        if any(c in key for c in ('\r','\n','\x00')):raise scout.ScoutError('Re-enter the provider credential in Settings.')
+        curl=shutil.which('curl.exe') or shutil.which('curl')
+        if not curl:raise scout.ScoutError('curl is required.')
+        destination=Path(destination);destination.parent.mkdir(parents=True,exist_ok=True)
+        partial=destination.with_name(destination.name+'.part')
+        with tempfile.TemporaryDirectory(prefix='company-download-') as temporary:
+            header_file=Path(temporary)/'headers.txt'
+            args=[curl,'-q','--silent','--show-error','--location','--max-redirs','3','--connect-timeout','10','--max-time',str(max_time),'--max-filesize',str(max_bytes),'--config','-','--dump-header',str(header_file),'--output',str(partial),'--write-out','%{http_code}',(self.local_origin or PROVIDERS[provider][0])+path]
+            # Redirects stay on HTTPS; curl 7.58+ (README requires 7.76+) drops Authorization on cross-host redirects.
+            if not self.local_origin:args[1:1]=['--proto','=https','--proto-redir','=https']
+            config='header = '+scout.curl_quote('Authorization: Bearer '+key)+'\n'
+            try:
+                process=subprocess.run(args,input=config,capture_output=True,text=True,encoding='utf-8',errors='replace',timeout=max_time+15)
+            except subprocess.TimeoutExpired:
+                partial.unlink(missing_ok=True);raise scout.ScoutError('Provider download timed out.') from None
+            except OSError as exc:
+                partial.unlink(missing_ok=True);raise scout.ScoutError('Could not start curl: '+str(exc)) from None
+            status=process.stdout.strip()[-3:]
+            if process.returncode or not status.isdigit() or not 200<=int(status)<300:
+                detail=''
+                if partial.exists() and partial.stat().st_size<20000:detail=partial.read_text(encoding='utf-8',errors='replace')[:500]
+                partial.unlink(missing_ok=True)
+                raise scout.ScoutError(scout.redact(f'{provider} download failed (HTTP {status or "?"}). {detail}'.strip()))
+            media=''
+            if header_file.exists():
+                for line in header_file.read_text(encoding='utf-8',errors='replace').splitlines():
+                    if line.lower().startswith('content-type:'):media=line.split(':',1)[1].split(';')[0].strip().lower()
+        partial.replace(destination)
+        return media
+    def launch(self,provider,method,path,body=None,stream=False,headers=None,max_bytes=4000000,max_time=180,error_field_ok=False):
         from contextlib import contextmanager
         @contextmanager
         def call():
@@ -115,7 +150,7 @@ class ProviderHTTP:
             if not curl:raise scout.ScoutError('curl is required.')
             with tempfile.TemporaryDirectory(prefix='company-provider-') as temporary:
                 folder=Path(temporary);header_file=folder/'headers.txt'
-                args=[curl,'-q','--silent','--show-error','--no-buffer','--connect-timeout','10','--max-time','180','--max-filesize','4000000','--config','-','--request',method,'--dump-header',str(header_file),(self.local_origin or PROVIDERS[provider][0])+path]
+                args=[curl,'-q','--silent','--show-error','--no-buffer','--connect-timeout','10','--max-time',str(max_time),'--max-filesize',str(max_bytes),'--config','-','--request',method,'--dump-header',str(header_file),(self.local_origin or PROVIDERS[provider][0])+path]
                 if body is not None:
                     payload=folder/'request.json';payload.write_text(json.dumps(body,ensure_ascii=False),encoding='utf-8');args+=['--data-binary','@'+str(payload)]
                 values=['Authorization: Bearer '+key,'Content-Type: application/json','Accept: '+('text/event-stream' if stream else 'application/json')]
@@ -134,12 +169,13 @@ class ProviderHTTP:
                             raise scout.ScoutError(scout.redact(provider+' stream: '+str(exc).split('\n')[0])) from None
                         yield observer
                     else:
-                        output,error=process.communicate(config,timeout=185)
+                        output,error=process.communicate(config,timeout=max_time+5)
                         raw,_,status=output.rpartition('\n')
                         if process.returncode or not status.isdigit():raise scout.ScoutError('Provider connection interrupted; inspect external actions before retrying.')
                         try:value=json.loads(raw)
                         except ValueError:raise scout.ScoutError(f'{provider} HTTP {status}: provider returned an invalid JSON response.') from None
-                        if not 200<=int(status)<300 or (isinstance(value,dict) and (value.get('error') or value.get('success') is False or value.get('ok') is False)):
+                        # Some 2xx bodies (e.g. a failed video job's status) legitimately carry an error field.
+                        if not 200<=int(status)<300 or (not error_field_ok and isinstance(value,dict) and (value.get('error') or value.get('success') is False or value.get('ok') is False)):
                             raise scout.ScoutError(scout.redact(f'{provider} HTTP {status}: '+json.dumps(value)[:2000]))
                         yield value
                 except subprocess.TimeoutExpired:
@@ -151,7 +187,7 @@ class ProviderHTTP:
                         if pipe and not pipe.closed:pipe.close()
         return call()
 
-def complete(http,model,messages,tools,on_text,cancelled,max_rounds=8):
+def complete(http,model,messages,tools,on_text,cancelled,max_rounds=8,on_usage=None):
     """Bounded streamed OpenRouter tool loop. A disconnect is surfaced, never replayed."""
     if not isinstance(max_rounds,int) or isinstance(max_rounds,bool) or not 1<=max_rounds<=12:raise scout.ScoutError('Choose a tool-call limit from 1 to 12.')
     executed={}
@@ -165,6 +201,8 @@ def complete(http,model,messages,tools,on_text,cancelled,max_rounds=8):
             for event in stream.events(cancelled):
                 if cancelled():raise scout.ScoutError('Conversation stopped.')
                 if event.get('error'):raise scout.ScoutError('OpenRouter stream error: '+scout.redact(event['error']))
+                # OpenRouter reports provider cost in the final chunk of each streamed round.
+                if on_usage and isinstance(event.get('usage'),dict):on_usage(event['usage'])
                 choices=event.get('choices') or []
                 if not choices:continue
                 if not isinstance(choices,list) or not isinstance(choices[0],dict):raise scout.ScoutError('Malformed OpenRouter choices.')

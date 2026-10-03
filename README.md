@@ -1,6 +1,6 @@
 # CrewBot
 
-A company workspace where Mentor learns your business, proposes AI employees, and turns goals into tracked work. Starts blank: one Mentor, no preset business, specialist employees or demo leads.
+A company workspace where Mentor learns your business, proposes AI employees, and turns goals into tracked work. Employees can now produce finished brand deliverables: logos, posters, social graphics, short videos, landing pages and funnels, through the OpenRouter image, video and chat models you choose. Starts blank: one Mentor, no preset business, specialist employees or demo leads.
 
 ## Run
 
@@ -30,6 +30,25 @@ Open **http://127.0.0.1:8765/** for the landing page and **http://127.0.0.1:8765
 
 **Add a company** creates separate employees, keys, knowledge, tasks, reports and branding. No owner's business profile or project is shipped.
 
+## Studio: brand assets, video, landing pages and funnels
+
+Studio is the company's creative department. It uses only your OpenRouter key.
+
+| Deliverable | How it is made | Notes |
+|---|---|---|
+| Logo, social post (4:5), story (9:16), poster (2:3), banner (16:9), ad, product shot | `POST /api/v1/images` with the image model you pick from OpenRouter's live catalog | Purpose presets set the aspect ratio. Vector models (e.g. Recraft) return SVG. Up to 4 per request, optional reference image. |
+| Short brand video | Asynchronous `POST /api/v1/videos`, then the scheduler polls and downloads the file | Duration, ratio and resolution come from the selected model. Optional start frame from a Studio image. Billed only when complete. |
+| Landing page, website page, multi-step funnel | An engineer, designer or marketer employee writes standalone HTML with `build_web_page` | Brand images are embedded with `{{asset:ID}}` placeholders and inlined on preview/export. Each version is kept. |
+
+- **Expert roster.** AI employees → *Hire an expert* adds a ready-made role in one click: software engineer (websites/funnels), brand designer (logos/posters/video), marketing lead (campaigns/social), researcher, offer strategist, operations director, automation, customer success, architect. Each role's capability bounds its tools: only designer and marketing roles can render video, and only engineer/designer/marketing roles can build pages.
+- **Brand kit.** Settings → Company branding adds *visual style* and *brand voice*. Together with the business name, offering, audience and colors, they are applied to every image/video prompt and every employee's context. A generated raster logo can become the workspace logo.
+- **Pick any model.** Set company defaults in Settings (image, video, chat) and override the chat model per employee with any tool-capable OpenRouter model ID.
+- **Real costs and a budget.** Every chat round, image and video records the provider-reported `usage.cost`. Studio shows this month's spend by type. Generation and new employee work stop at the monthly budget (Settings, default $10). Failed generations record no spend. Identical tool calls within a task reuse the saved result instead of paying twice.
+- **Safe preview and export.** Generated pages and assets are served with a sandbox Content-Security-Policy: opaque origin, no network access, no access to the workspace or its action token. Download any file, or *Export all* as a zip with a manifest.
+- **Brand launch kit workflow.** Designer (logo, hero, launch post) → engineer (landing page using those assets) → marketer (launch plan and posts).
+
+Studio pages are HTML previews: forms do not submit until you connect your own backend, and CrewBot does not host or deploy pages.
+
 ## Make it yours
 
 Settings → **Company branding** offers a workspace name, accent/navigation/background colors, live preview, save and discard. Upload your PNG, JPEG or WebP logo, up to 2 MB. Branding is saved per company. CrewBot includes an SVG logo and distinct employee icons.
@@ -38,7 +57,7 @@ Settings → **Company branding** offers a workspace name, accent/navigation/bac
 
 | Provider | Configuration | Use |
 |---|---|---|
-| OpenRouter | OPENROUTER_API_KEY or Settings | Streamed chat and bounded function tools |
+| OpenRouter | OPENROUTER_API_KEY or Settings | Streamed chat and bounded function tools; Image API and Video API for Studio |
 | OpenAI Agents | OPENAI_API_KEY and company project ID | Hosted sessions, web search and execution |
 | Jev | OpenRouter key, typesafe/jev-1.13 | Recommend employee ownership through Decisions API |
 | Tavily | TAVILY_API_KEY | Search with source URLs |
@@ -96,6 +115,7 @@ node --check web/os.js
 node --check web/landing.js
 node --check web/app.js
 node --check web/operations.js
+node --check web/studio.js
 ```
 
 Tests use isolated localhost providers and actual curl, with no live credentials. CI runs on Ubuntu and Windows. See [VERIFICATION.md](VERIFICATION.md), [COMPANY-OS-GUIDE.md](COMPANY-OS-GUIDE.md) and [BRAND.md](BRAND.md).
