@@ -9,9 +9,10 @@ import binascii
 import copy
 from datetime import datetime,timezone
 import hashlib
-import io
 import json
+import math
 import re
+import tempfile
 import threading
 import time
 import uuid
@@ -38,6 +39,7 @@ ASSET_REF=re.compile(r'\{\{asset:([a-f0-9]{24})\}\}')
 MAX_IMAGE_RESPONSE=90_000_000
 MAX_VIDEO_BYTES=400_000_000
 MAX_PAGE_BYTES=600_000
+MAX_INLINE_BYTES=8_000_000
 POLL_SECONDS=20
 MEDIA_DEFAULTS={'image_model':'google/gemini-3.1-flash-image','video_model':'google/veo-3.1-lite','media_budget_usd':10.0}
 
@@ -56,12 +58,17 @@ def sniff_video(path):
     if head.startswith(b'\x1aE\xdf\xa3'):return 'video/webm'
     return None
 
+def valid_cost(value):
+    """Provider-reported USD cost, or None when absent or not a finite non-negative number."""
+    if isinstance(value,bool) or not isinstance(value,(int,float)) or not math.isfinite(value) or value<0:return None
+    return float(value)
+
 def month_key(value=None):
     return (value or datetime.now(timezone.utc)).strftime('%Y-%m')
 
 class Media:
     def __init__(self,app):
-        self.app=app;self.w=app.w;self.catalogs={};self.polling=set();self.poll_lock=threading.Lock()
+        self.app=app;self.w=app.w;self.catalogs={};self.polling=set();self.poll_lock=threading.Lock();self.submit_lock=threading.Lock()
         with self.w.lock:
             for key,value in MEDIA_DEFAULTS.items():self.app.settings.setdefault(key,value)
             for key in ('assets','media_jobs','usage'):self.w.store.setdefault(key,[])
@@ -72,10 +79,10 @@ class Media:
     def folder(self):return self.w.folder/'assets'
     # ---------- spend ----------
     def record_usage(self,kind,usage,model,task=None,asset_ids=None):
-        cost=usage.get('cost') if isinstance(usage,dict) else None
-        if isinstance(cost,bool) or not isinstance(cost,(int,float)) or cost<0:return 0.0
+        cost=valid_cost(usage.get('cost')) if isinstance(usage,dict) else None
+        if cost is None:return 0.0
         with self.w.lock:
-            self.w.store['usage'].append({'time':stamp(),'month':month_key(),'kind':kind,'model':model,'cost':float(cost),'task_id':task['id'] if task else None,'employee_id':task['employee_id'] if task else None,'asset_ids':asset_ids or []})
+            self.w.store['usage'].append({'time':stamp(),'month':month_key(),'kind':kind,'model':model,'cost':cost,'task_id':task['id'] if task else None,'employee_id':task['employee_id'] if task else None,'asset_ids':asset_ids if asset_ids is not None else []})
             self.w.store['usage']=self.w.store['usage'][-5000:];self.w.changed()
         return float(cost)
     def spend(self):
@@ -195,6 +202,10 @@ class Media:
         self.check_budget()
         self.w.log(f'Generating {count} {purpose.replace("_"," ")} image(s) with {model}',task)
         value=self.app.http.request('openrouter','POST','/v1/images',payload,max_bytes=MAX_IMAGE_RESPONSE,max_time=300)
+        usage=value.get('usage') if isinstance(value,dict) and isinstance(value.get('usage'),dict) else {}
+        # The provider bills a 2xx generation even if its payload turns out unusable, so record spend first.
+        cost=valid_cost(usage.get('cost'));asset_ids=[]
+        self.record_usage('image',usage,model,task,asset_ids)
         images=value.get('data') if isinstance(value,dict) else None
         if not isinstance(images,list) or not images:raise scout.ScoutError('OpenRouter returned no images. No asset was saved.')
         decoded=[]
@@ -205,12 +216,10 @@ class Media:
             mime=sniff_image(raw)
             if not mime:raise scout.ScoutError('OpenRouter returned an unrecognized image format.')
             decoded.append((raw,mime))
-        usage=value.get('usage') if isinstance(value.get('usage'),dict) else {}
-        cost=usage.get('cost') if isinstance(usage.get('cost'),(int,float)) and not isinstance(usage.get('cost'),bool) else None
         saved=[]
         for index,(raw,mime) in enumerate(decoded):
             saved.append(self.add_asset(raw,mime,{'kind':'image','purpose':purpose,'title':title if len(decoded)==1 else f'{title} ({index+1})','prompt':prompt,'model':model,'aspect_ratio':aspect,'brand_applied':bool(brand),'cost':round(cost/len(decoded),6) if cost is not None else None},task))
-        self.record_usage('image',usage,model,task,[a['id'] for a in saved])
+        with self.w.lock:asset_ids.extend(a['id'] for a in saved);self.w.changed()
         self.w.log(f'{len(saved)} image asset(s) saved'+(f' · ${cost:.4f}' if cost is not None else ''),task)
         return {'assets':[self.public(a) for a in saved],'cost':cost,'embed':['{{asset:'+a['id']+'}}' for a in saved]}
     # ---------- videos ----------
@@ -241,6 +250,9 @@ class Media:
         if not isinstance(use_brand,bool):raise scout.ScoutError('Invalid brand setting.')
         brand=self.brand_context() if use_brand else ''
         payload['prompt']=(prompt+('\n\nBrand guidelines:\n'+brand if brand else ''))[:8000]
+        with self.submit_lock:
+            return self.submit_video(payload,title,prompt,model,task)
+    def submit_video(self,payload,title,prompt,model,task):
         with self.w.lock:
             active=[j for j in self.w.store['media_jobs'] if j['status'] in ('pending','in_progress','downloading')]
             if len(active)>=3:raise scout.ScoutError('Three videos are already rendering. Wait for one to finish.')
@@ -266,25 +278,29 @@ class Media:
             value=self.app.http.request('openrouter','GET','/v1/videos/'+job['provider_job_id'],max_time=60,error_field_ok=True)
             status=value.get('status')
             if status in ('pending','in_progress'):
-                with self.w.lock:job.update(status=status,next_poll=time.time()+POLL_SECONDS);self.w.changed()
+                with self.w.lock:job.update(status=status,next_poll=time.time()+POLL_SECONDS,failures=0,error=None);self.w.changed()
                 return
             if status!='completed':
                 with self.w.lock:job.update(status='failed',error=scout.redact(str(value.get('error') or status or 'Video generation failed'))[:1000]);self.w.log('Video render failed: '+job['title'])
                 return
-            with self.w.lock:job['status']='downloading';self.w.changed()
+            usage=value.get('usage') if isinstance(value.get('usage'),dict) else {}
+            task=None
+            with self.w.lock:
+                if job.get('task_id'):
+                    try:task=self.w.task(job['task_id'])
+                    except scout.ScoutError:task=None
+                first=not job.get('billed')
+                job.update(status='downloading',billed=True)
+                cost=valid_cost(usage.get('cost'));job['cost']=cost;self.w.changed()
+            # Billed once on completion even if the download later fails.
+            if first:self.record_usage('video',usage,job['model'],task)
             temporary=self.folder/('download-'+identifier+'.bin')
             self.app.http.download('openrouter','/v1/videos/'+job['provider_job_id']+'/content?index=0',temporary,MAX_VIDEO_BYTES)
             mime=sniff_video(temporary)
             if not mime:
                 temporary.unlink(missing_ok=True);raise scout.ScoutError('Downloaded video is not a recognized MP4/WebM/MOV file.')
             raw=temporary.read_bytes();temporary.unlink(missing_ok=True)
-            usage=value.get('usage') if isinstance(value.get('usage'),dict) else {}
-            task=None
-            with self.w.lock:
-                if job.get('task_id'):task=self.w.task(job['task_id'])
-            cost=usage.get('cost') if isinstance(usage.get('cost'),(int,float)) and not isinstance(usage.get('cost'),bool) else None
             item=self.add_asset(raw,mime,{'kind':'video','purpose':'video','title':job['title'],'prompt':job['prompt'],'model':job['model'],'params':job['params'],'brand_applied':True,'cost':cost},task)
-            self.record_usage('video',usage,job['model'],task,[item['id']])
             with self.w.lock:job.update(status='completed',asset_id=item['id'],cost=cost);self.w.log('Video ready: '+job['title']+(f' · ${cost:.4f}' if cost is not None else ''))
         except Exception as exc:
             with self.w.lock:
@@ -306,7 +322,8 @@ class Media:
         # Only configured credentials are rejected; the generic key regex misfires on CSS class names.
         if any(len(k)>=8 and k in html for k in tuple(scout.SECRETS)):raise scout.ScoutError('Page appears to contain an API key. Remove credentials from the page.')
         if '<html' not in html.lower() and '<body' not in html.lower():raise scout.ScoutError('Provide a complete standalone HTML document with <html> and <body>.')
-        missing=[ref for ref in ASSET_REF.findall(html) if not any(a['id']==ref for a in self.w.store['assets'])]
+        with self.w.lock:known={a['id'] for a in self.w.store['assets']}
+        missing=[ref for ref in ASSET_REF.findall(html) if ref not in known]
         if missing:raise scout.ScoutError('Unknown asset references: '+', '.join(missing[:5])+'. Use IDs from list_brand_assets or generate_image.')
         funnel=body.get('funnel') or ''
         if funnel:funnel=text(funnel,80)
@@ -322,13 +339,17 @@ class Media:
     def render_page(self,item):
         html=self.asset_path(item).read_text(encoding='utf-8')
         def inline(match):
-            try:return self.data_url(match[1],('image','video'))
+            try:
+                item=self.asset(match[1])
+                if item['bytes']>MAX_INLINE_BYTES:return ''
+                return self.data_url(match[1],('image',))
             except scout.ScoutError:return ''
         return ASSET_REF.sub(inline,html).encode()
     def export_zip(self):
-        buffer=io.BytesIO();manifest=[]
+        """Write all assets to a temporary zip on disk; the caller streams and closes the returned file."""
+        handle=tempfile.TemporaryFile();manifest=[]
         with self.w.lock:items=copy.deepcopy(self.w.store['assets'])
-        with zipfile.ZipFile(buffer,'w',zipfile.ZIP_DEFLATED) as archive:
+        with zipfile.ZipFile(handle,'w',zipfile.ZIP_DEFLATED) as archive:
             for item in items:
                 try:
                     raw=self.render_page(item) if item['kind']=='page' else self.asset_path(item).read_bytes()
@@ -337,7 +358,8 @@ class Media:
                 name=f"{item['kind']}s/{safe}-{item['id'][:8]}.{item['filename'].rsplit('.',1)[1]}"
                 archive.writestr(name,raw);manifest.append({**self.public(item),'file':name})
             archive.writestr('manifest.json',json.dumps(manifest,ensure_ascii=False,indent=2))
-        return buffer.getvalue()
+        handle.seek(0)
+        return handle
     def list_assets(self,kind=None):
         with self.w.lock:items=[self.public(a) for a in self.w.store['assets'] if not kind or a['kind']==kind][-60:]
         return {'assets':[{k:a.get(k) for k in ('id','kind','purpose','title','mime','aspect_ratio','funnel','step','created_at')}|{'embed':'{{asset:'+a['id']+'}}'} for a in items]}

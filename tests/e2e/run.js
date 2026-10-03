@@ -96,7 +96,7 @@ function check(name, ok, detail = '') { results.push({ name, ok: !!ok, detail })
   check('Brand image inlined into page', inlined && inlined.startsWith('data:image/png;base64,'));
   await page.waitForTimeout(800);
   const leaked = await frame.locator('body').evaluate(b => document.title === 'LEAKED' ? 'LEAKED' : (b.dataset.sandbox || 'pending'));
-  check('Generated page cannot read workspace state (sandbox)', leaked !== 'LEAKED', leaked);
+  check('Generated page cannot read workspace state (sandbox)', leaked === 'blocked', leaked);
   await page.screenshot({ path: OUT + '/03-page-preview.png' });
   await page.click('#os-dialog button[aria-label="Mobile"], #os-dialog .preview-bar button:nth-child(2)');
   await page.waitForTimeout(400);

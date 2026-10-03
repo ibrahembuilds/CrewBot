@@ -133,7 +133,12 @@ class StudioTests(unittest.TestCase):
                 with self.assertRaises(scout.ScoutError):w.os.media.generate_image(bad)
             fixture.image=b'not an image at all'
             with self.assertRaisesRegex(scout.ScoutError,'unrecognized image'):w.os.media.generate_image({'prompt':'A banner','purpose':'banner'})
-            self.assertEqual(w.store['assets'],[]);self.assertEqual(w.store['usage'],[],'Failed generations record no spend')
+            self.assertEqual(w.store['assets'],[])
+            self.assertAlmostEqual(w.os.media.spend()['by_kind']['image'],0.04,msg='A billed 2xx response counts even if its payload is unusable')
+            fixture.image=PNG;fixture.image_cost=float('nan');before=w.os.media.spend()['total']
+            w.os.media.generate_image({'prompt':'A banner','purpose':'banner'})
+            self.assertEqual(w.os.media.spend()['total'],before,'Non-finite costs are ignored, never stored')
+            json.dumps(w.os.snapshot(),allow_nan=False)
 
     def test_video_lifecycle_poll_download_and_cost(self):
         with OpenRouterFixture() as fixture:
@@ -160,6 +165,7 @@ class StudioTests(unittest.TestCase):
             for attempt in range(5):
                 w.os.media.poll_videos(clock=time.time()+10_000);settled=self.wait_job(w,job['id'],('in_progress','failed'))
             self.assertEqual(settled['status'],'failed');self.assertEqual(settled['failures'],5);self.assertIsNone(settled['asset_id'])
+            self.assertAlmostEqual(w.os.media.spend()['by_kind']['video'],0.4,msg='A completed render is billed exactly once even when downloads fail')
             while len([j for j in w.store['media_jobs'] if j['status'] in ('pending','in_progress')])<3:w.os.media.start_video({'prompt':'Queue'})
             with self.assertRaisesRegex(scout.ScoutError,'already rendering'):w.os.media.start_video({'prompt':'One too many'})
 
@@ -262,5 +268,43 @@ class StudioTests(unittest.TestCase):
             restarted=self.app(fixture)
             resumed=next(j for j in restarted.store['media_jobs'] if j['id']==job['id'])
             self.assertEqual((resumed['status'],resumed['next_poll']),('in_progress',0))
+
+    def test_review_regressions(self):
+        # A paused hosted Mentor task must not stop an older workspace from loading during the Mentor prompt upgrade.
+        w=self.app()
+        with w.lock:
+            w.roles['mentor']['instructions']=w.roles['mentor']['instructions'][:200]+' (older stock text)'
+            t=w.create_task({'employee_id':'mentor','title':'Hosted','description':'Hosted'},start=False);t.update(provider='openai',submitted=True,status='paused');w.persist()
+        scout.save_json(self.folder/'employees.json',w.employees)
+        reloaded=self.app();self.assertIn('mentor',reloaded.roles)
+        with OpenRouterFixture() as fixture:
+            w=self.app(fixture);w.os.hire_expert({'expert':'designer'})
+            # Model-supplied keys outside the tool schema (model, quality) are dropped.
+            fixture.calls=[('generate_image',{'prompt':'Post','purpose':'social_post','title':'Post','model':'openai/gpt-image-2','quality':'high'})]
+            task=w.task(w.os.chat({'employee_id':'designer','message':'Post'})['task_id']);self.wait(w,task)
+            sent=fixture.posted('/v1/images')[-1];self.assertEqual(sent['model'],'google/gemini-3.1-flash-image');self.assertNotIn('quality',sent)
+            usage_rows=[r for r in w.store['usage'] if r['kind']=='image'];self.assertEqual(usage_rows[-1]['asset_ids'],task['asset_ids'])
+            # A good poll resets transient failures.
+            job=w.os.media.start_video({'prompt':'Long render'})['job']
+            with w.lock:next(j for j in w.store['media_jobs'] if j['id']==job['id'])['failures']=4
+            fixture.video_states=['in_progress'];w.os.media.poll_videos(clock=time.time()+60)
+            self.assertEqual(self.wait_job(w,job['id'],('in_progress',))['failures'],0)
+            # Pages never inline video; state snapshots keep raw studio rows server-side.
+            fixture.video_states=['completed'];w.os.media.poll_videos(clock=time.time()+60);video=w.os.media.asset(self.wait_job(w,job['id'])['asset_id'])
+            page=w.os.media.save_web_page({'title':'V','html':'<html><body><video src="{{asset:'+video['id']+'}}"></video></body></html>','page_type':'landing'})['asset']
+            self.assertNotIn('data:video',w.os.media.render_page(w.os.media.asset(page['id'])).decode())
+            hub=OSHub(w)
+            state=hub.snapshot('default')
+            for key in ('usage','assets','media_jobs','os_tool_receipts'):self.assertNotIn(key,state)
+            self.assertEqual(len(state['operating_system']['studio']['assets']),3)
+            server=ThreadingHTTPServer(('127.0.0.1',0),company.make_handler(w));server.daemon_threads=True
+            threading.Thread(target=server.serve_forever,daemon=True).start();url=f'http://127.0.0.1:{server.server_port}'
+            try:
+                with urlopen(Request(url+'/api/os/asset?company=default&id='+video['id'],headers={'Range':'bytes=4-11'})) as r:
+                    self.assertEqual(r.status,206);self.assertEqual(r.read(),MP4[4:12]);self.assertEqual(r.headers['Content-Range'],f'bytes 4-11/{len(MP4)}')
+                    self.assertIn('immutable',r.headers['Cache-Control'])
+                with self.assertRaises(HTTPError) as caught:urlopen(Request(url+'/api/os/asset?company=default&id='+video['id'],headers={'Range':'bytes=99999-'}))
+                self.assertEqual(caught.exception.code,416)
+            finally:server.shutdown();server.server_close()
 
 if __name__=='__main__':unittest.main()

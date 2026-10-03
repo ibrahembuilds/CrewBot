@@ -114,11 +114,15 @@ class ProviderHTTP:
         with tempfile.TemporaryDirectory(prefix='company-download-') as temporary:
             header_file=Path(temporary)/'headers.txt'
             args=[curl,'-q','--silent','--show-error','--location','--max-redirs','3','--connect-timeout','10','--max-time',str(max_time),'--max-filesize',str(max_bytes),'--config','-','--dump-header',str(header_file),'--output',str(partial),'--write-out','%{http_code}',(self.local_origin or PROVIDERS[provider][0])+path]
+            # Redirects stay on HTTPS; curl 7.58+ (README requires 7.76+) drops Authorization on cross-host redirects.
+            if not self.local_origin:args[1:1]=['--proto','=https','--proto-redir','=https']
             config='header = '+scout.curl_quote('Authorization: Bearer '+key)+'\n'
             try:
                 process=subprocess.run(args,input=config,capture_output=True,text=True,encoding='utf-8',errors='replace',timeout=max_time+15)
             except subprocess.TimeoutExpired:
                 partial.unlink(missing_ok=True);raise scout.ScoutError('Provider download timed out.') from None
+            except OSError as exc:
+                partial.unlink(missing_ok=True);raise scout.ScoutError('Could not start curl: '+str(exc)) from None
             status=process.stdout.strip()[-3:]
             if process.returncode or not status.isdigit() or not 200<=int(status)<300:
                 detail=''

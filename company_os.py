@@ -60,7 +60,9 @@ class CompanyOS:
                 mentor=w.roles['mentor']
                 # Upgrade an unedited stock Mentor prompt so older workspaces learn the new expert categories.
                 if mentor.get('instructions','').startswith(MENTOR[:120]) and mentor['instructions']!=MENTOR:
-                    self.upsert_role({'id':'mentor','instructions':MENTOR},initial=True)
+                    # Best effort: an unfinished hosted Mentor task blocks role edits; retry on a later start, never fail loading.
+                    try:self.upsert_role({'id':'mentor','instructions':MENTOR},initial=True)
+                    except scout.ScoutError:pass
                 self.install_tools()
             w.operations.http=self.http
             if w.api_factory is scout.CurlAPI:w.api_factory=self.openai_api
@@ -183,12 +185,15 @@ class CompanyOS:
              spec('route_with_jev','Ask Jev to recommend an employee for a brief; returns confidence, never grants permissions.',{'brief':S})])
         return definitions
     def handlers(self,task):
+        schemas={d['name']:set(d['parameters']['properties']) for d in self.definitions(task['employee_id'])}
+        # Model output may add unlisted keys (e.g. an expensive model or 4K); only owner UI requests may set those.
+        schema_only=lambda name,args:{k:v for k,v in args.items() if k in schemas[name]}
         def assign(args):
             prior=next((t for t in self.w.store['tasks'] if t.get('parent_id')==task['id'] and t['employee_id']==args.get('employee_id') and t['description']==args.get('description')),None)
             if prior:return {'task_id':prior['id'],'owner':prior['employee_id'],'status':prior['status']}
             child=self.w.create_task(args,parent_id=task['id']);return {'task_id':child['id'],'owner':child['employee_id'],'status':child['status']}
         actions={'search_web':lambda a:self.search(a['query']),'scrape_page':lambda a:self.scrape(a['url']),'write_deliverable':lambda a:self.artifact(task,a),
-         'list_brand_assets':lambda a:self.media.list_assets(None if a.get('kind') in (None,'any') else a['kind']),'generate_image':lambda a:self.media.generate_image(a,task),'generate_video':lambda a:self.media.start_video(a,task),'build_web_page':lambda a:self.media.save_web_page(a,task),
+         'list_brand_assets':lambda a:self.media.list_assets(None if a.get('kind') in (None,'any') else a['kind']),'generate_image':lambda a:self.media.generate_image(schema_only('generate_image',a),task),'generate_video':lambda a:self.media.start_video(schema_only('generate_video',a),task),'build_web_page':lambda a:self.media.save_web_page(schema_only('build_web_page',a),task),
          'update_company_brief':lambda a:self.update_business_profile(a),'update_business_profile':lambda a:self.update_business_profile(a),'save_team_proposal':lambda a:self.save_team_proposal(a),'suggest_team':lambda a:self.suggest(), 'configure_role':lambda a:self.upsert_role(a),
          'assign_work':assign,'schedule_work':lambda a:self.w.operations.save_schedule(a),'route_with_jev':lambda a:self.route(a['brief'])}
         def wrap(name):
@@ -226,6 +231,7 @@ class CompanyOS:
         criteria={e['id']:e['role']+' — '+e['description'] for e in self.w.employees if e['id']!='mentor'}
         if not criteria:raise scout.ScoutError('Create at least one employee before routing work with Jev.')
         value=self.http.request('openrouter','POST','/alpha/decisions',{'model':self.settings['decision_model'],'state':text(brief,20000),'questions':{'owner':{'type':'choice','instructions':'Which employee is the best owner for this task? This is only a recommendation.','criteria':criteria}}})
+        self.media.record_usage('chat',value.get('usage'),self.settings['decision_model'])
         answer=value.get('answers',{}).get('owner',{})
         if answer.get('choice') not in criteria:raise scout.ScoutError('Jev returned an unknown employee; choose an owner manually.')
         return {'employee_id':answer['choice'],'confidence':answer.get('confidence'),'probabilities':answer.get('probabilities')}
@@ -352,10 +358,11 @@ class CompanyOS:
     def hire_expert(self,body):
         expert=next((e for e in EXPERTS if e['id']==body.get('expert')),None)
         if not expert:raise scout.ScoutError('Choose an expert from the roster.')
-        identifier=expert['id'];suffix=2
-        while identifier in self.w.roles:identifier=f"{expert['id']}-{suffix}";suffix+=1
-        result=self.upsert_role({**expert,'id':identifier,'name':text(body.get('name') or expert['name'],80)})
-        if body.get('chat_model'):self.upsert_role({'id':identifier,'chat_model':text(body['chat_model'],150)})
+        with self.w.lock:
+            identifier=expert['id'];suffix=2
+            while identifier in self.w.roles:identifier=f"{expert['id']}-{suffix}";suffix+=1
+            result=self.upsert_role({**expert,'id':identifier,'name':text(body.get('name') or expert['name'],80)})
+            if body.get('chat_model'):self.upsert_role({'id':identifier,'chat_model':text(body['chat_model'],150)})
         return result
     def onboard(self,body):
         self.update_business_profile(body)
@@ -470,7 +477,10 @@ class OSHub:
             if record['id'] in self.companies:record['name']=scout.load_json(self.companies[record['id']].folder/'company.json')['name']
         operating=w.os.snapshot();logo=w.os.logo_path()
         operating['branding']['logo_url']='/api/os/logo?company='+identifier+'&v='+logo.stem if logo else ''
-        return {**w.snapshot(),'token':self.root.token,'company_id':identifier,'companies':records,'operating_system':operating}
+        state=w.snapshot()
+        # Studio data is served in its public form under operating_system.studio; raw usage rows stay server-side.
+        for key in ('usage','assets','media_jobs','os_tool_receipts'):state.pop(key,None)
+        return {**state,'token':self.root.token,'company_id':identifier,'companies':records,'operating_system':operating}
     def action(self,body):
         data=body.get('data',{});action=body.get('action')
         if not isinstance(data,dict):raise scout.ScoutError('Expected action data.')
